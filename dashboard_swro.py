@@ -1,6 +1,7 @@
 """
 AquaMind SWRO – Executive Operations Dashboard
 Nivel empresarial | Control Room Style | Alertas visuales | KPIs avanzados
+Versión corregida: selecciona último día válido
 """
 
 import streamlit as st
@@ -105,6 +106,9 @@ def load_data():
             p = df[f'perm_{t}'].fillna(0)
             r = df[f'rech_{t}'].fillna(0)
             df[f'rec_{t}'] = np.where((p + r) > 0, 100 * p / (p + r), np.nan)
+
+        # Marcar días válidos (con producción real)
+        df['valido'] = df['produccion_real'] > 100
         return df
     except Exception as e:
         st.error(f"Error de conexión con Google Sheet: {e}")
@@ -113,13 +117,21 @@ def load_data():
 def get_record_vigente(df):
     if df.empty:
         return None, "Sin datos"
+    
+    # Filtrar solo días válidos
+    df_valid = df[df['valido'] == True].copy()
+    if df_valid.empty:
+        df_valid = df.copy()  # fallback
+    
     now = datetime.now()
-    last = df.iloc[-1]
+    last_valid = df_valid.iloc[-1]
+    
     if now.hour < 19:
-        if len(df) > 1 and last['fecha'].date() == now.date():
-            return df.iloc[-2], f"Cierre anterior · {df.iloc[-2]['fecha'].strftime('%d/%m/%Y')}"
-        return last, f"Último cierre · {last['fecha'].strftime('%d/%m/%Y')}"
-    return last, f"Cierre del día · {last['fecha'].strftime('%d/%m/%Y')} (≥19:00)"
+        # Antes de 19:00 → último día válido cerrado
+        return last_valid, f"Último cierre válido · {last_valid['fecha'].strftime('%d/%m/%Y')}"
+    else:
+        # Después de 19:00 → último día válido (si es hoy o el más reciente)
+        return last_valid, f"Cierre del día · {last_valid['fecha'].strftime('%d/%m/%Y')} (≥19:00)"
 
 # ====================== HEADER ======================
 st.markdown('<div class="header-bar">', unsafe_allow_html=True)
@@ -152,6 +164,7 @@ temp = float(record.get('temp_tk', 0) or 0)
 dp_a = float(record.get('dp_a', 0) or 0)
 
 def status_class(value, good, warn):
+    if pd.isna(value): return "status-red"
     if value >= good: return "status-green"
     if value >= warn: return "status-yellow"
     return "status-red"
@@ -178,10 +191,11 @@ with c2:
     """, unsafe_allow_html=True)
 
 with c3:
-    sc_c = "status-green" if cond < LIMITE_COND else "status-red"
+    sc_c = "status-green" if (not pd.isna(cond) and cond < LIMITE_COND) else "status-red"
+    cond_display = f"{cond:,.0f}" if not pd.isna(cond) else "N/A"
     st.markdown(f"""
     <div class="kpi-card">
-        <div class="kpi-value {sc_c}">{cond:,.0f}</div>
+        <div class="kpi-value {sc_c}">{cond_display}</div>
         <div class="kpi-label">COND. PERMEADO</div>
         <div class="kpi-sub">µS/cm · Límite {LIMITE_COND}</div>
     </div>
@@ -189,28 +203,31 @@ with c3:
 
 with c4:
     sc_r = status_class(rec_a, 40, 32)
+    rec_display = f"{rec_a:.1f}%" if not pd.isna(rec_a) else "N/A"
     st.markdown(f"""
     <div class="kpi-card">
-        <div class="kpi-value {sc_r}">{rec_a:.1f}%</div>
+        <div class="kpi-value {sc_r}">{rec_display}</div>
         <div class="kpi-label">RECUPERACIÓN A</div>
         <div class="kpi-sub">Tren A</div>
     </div>
     """, unsafe_allow_html=True)
 
 with c5:
-    sc_t = "status-green" if turb < 5 else "status-yellow" if turb < 10 else "status-red"
+    sc_t = "status-green" if (not pd.isna(turb) and turb < 5) else "status-yellow" if (not pd.isna(turb) and turb < 10) else "status-red"
+    turb_display = f"{turb:.1f}" if not pd.isna(turb) else "N/A"
     st.markdown(f"""
     <div class="kpi-card">
-        <div class="kpi-value {sc_t}">{turb:.1f}</div>
+        <div class="kpi-value {sc_t}">{turb_display}</div>
         <div class="kpi-label">TURBIDEZ TK</div>
         <div class="kpi-sub">NTU · Captación</div>
     </div>
     """, unsafe_allow_html=True)
 
 with c6:
+    temp_display = f"{temp:.1f}" if not pd.isna(temp) else "N/A"
     st.markdown(f"""
     <div class="kpi-card">
-        <div class="kpi-value status-blue">{temp:.1f}</div>
+        <div class="kpi-value status-blue">{temp_display}</div>
         <div class="kpi-label">TEMPERATURA</div>
         <div class="kpi-sub">°C · Agua de mar</div>
     </div>
@@ -221,20 +238,20 @@ st.subheader("Sistema de Alertas Inteligentes")
 
 alerts = []
 
-if pct < 70:
+if not pd.isna(pct) and pct < 70:
     alerts.append(("high", "Producción crítica", f"Solo {pct:.1f}% del objetivo. Revisar disponibilidad de trenes y recuperación."))
-elif pct < 90:
+elif not pd.isna(pct) and pct < 90:
     alerts.append(("medium", "Producción por debajo del objetivo", f"{pct:.1f}% del objetivo de {OBJETIVO:,.0f} m³/d."))
 
-if cond > LIMITE_COND:
+if not pd.isna(cond) and cond > LIMITE_COND:
     alerts.append(("high", "Conductividad fuera de especificación", f"{cond:,.0f} µS/cm (límite {LIMITE_COND})."))
 
-if turb > 10:
+if not pd.isna(turb) and turb > 10:
     alerts.append(("high", "Turbidez elevada en captación", f"{turb:.1f} NTU. Riesgo de carga al pretratamiento."))
-elif turb > 5:
+elif not pd.isna(turb) and turb > 5:
     alerts.append(("medium", "Turbidez en zona de atención", f"{turb:.1f} NTU en tanque de concreto."))
 
-if dp_a > 35:
+if not pd.isna(dp_a) and dp_a > 35:
     alerts.append(("medium", "ΔP Tren A elevado", f"{dp_a:.1f} PSI. Monitorear tendencia de fouling."))
 
 if not alerts:
@@ -251,7 +268,10 @@ for level, title, msg in alerts:
 # ====================== GRÁFICAS ======================
 st.subheader("Tendencias Operativas")
 
-df_plot = df.tail(120).copy()
+df_plot = df[df['valido'] == True].tail(120).copy()
+if df_plot.empty:
+    df_plot = df.tail(120).copy()
+
 tab1, tab2, tab3 = st.tabs(["Captación", "SWRO – ΔP & Recuperación", "Producción"])
 
 with tab1:
@@ -289,3 +309,4 @@ st.caption("AquaMind SWRO · Executive Dashboard · Cierre diario 19:00 · Actua
 # Auto-refresh
 time.sleep(60)
 st.rerun()
+
